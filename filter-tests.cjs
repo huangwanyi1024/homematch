@@ -1,0 +1,45 @@
+// Run with: node filter-tests.cjs. Uses only Node built-ins and the shipped HTML.
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),path=require('node:path');
+const html=fs.readFileSync(path.join(__dirname,'index.html'),'utf8');
+const script=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const nodes=new Map();
+const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',value:'',checked:false,hidden:false,className:'',classList:{add(){},remove(){},toggle(){}},setAttribute(){},focus(){},scrollIntoView(){},showModal(){this.open=true},close(){this.open=false}});return nodes.get(selector)};
+class DemoDate extends Date{constructor(...args){super(...(args.length?args:['2026-10-19T19:00:00Z']))}static now(){return +new Date('2026-10-19T19:00:00Z')}}
+const ctx=vm.createContext({Date:DemoDate,Intl,structuredClone,Uint8Array,console,document:{querySelector:node,querySelectorAll:()=>[],activeElement:null},sessionStorage:{getItem:()=>null,setItem(){}},window:{scrollTo(){}},setTimeout:()=>1,clearTimeout(){}});
+vm.runInContext(script,ctx);
+const run=s=>vm.runInContext(s,ctx);let count=0;
+function check(name,source){assert.equal(run(source),true,name);count++;console.log('PASS '+name)}
+run("S=fresh();const all={...structuredClone(DEFAULT_FILTERS),budget:'5000',location:'',move:'2027-01-01',type:'Any',room:'Any',amenities:[],maxCommute:'any'}");
+check('24 varied homes with unique IDs',"HOMES.length===24&&new Set(HOMES.map(h=>h.id)).size===24");
+check('Higher rent reveals more expensive private rooms',"resultsFor({...DEFAULT_FILTERS,budget:'2500'}).length>resultsFor(DEFAULT_FILTERS).length&&resultsFor({...DEFAULT_FILTERS,budget:'2500'}).some(h=>h.rent>1500)");
+check('Rent ceiling is inclusive',"resultsFor({...all,budget:'1450'}).some(h=>h.id==='mission')&&!resultsFor({...all,budget:'1449'}).some(h=>h.id==='mission')");
+check('Every rent increase preserves cheaper matches',"(()=>{let previous=[];for(let n=500;n<=5000;n+=50){const current=resultsFor({...all,budget:String(n)});if(!current.every(h=>h.rent<=n)||!previous.every(h=>current.includes(h)))return false;previous=current}return true})()");
+check('Pet friendly excludes the non-pet-friendly Daly City home',"!resultsFor({...all,amenities:['Pet friendly']}).some(h=>h.id==='daly')&&resultsFor({...all,amenities:['Pet friendly']}).every(h=>h.amenities.includes('Pet friendly'))");
+check('All 32 amenity combinations require every selected amenity',"(()=>{const amenities=['In-unit laundry','Pet friendly','Gym','AC','Parking'];for(let mask=0;mask<32;mask++){const selected=amenities.filter((x,i)=>mask&(1<<i));const results=resultsFor({...all,amenities:selected});if(!results.length||!results.every(h=>selected.every(x=>h.amenities.includes(x))))return false}return true})()");
+check('Property type works for all four categories',"['Apartment','House','Studio','Condo'].every(type=>{const r=resultsFor({...all,type});return r.length>0&&r.every(h=>h.type===type)})");
+check('Room type works for private, shared, and entire homes',"['Private Room','Shared Room','Entire Place'].every(room=>{const r=resultsFor({...all,room});return r.length>0&&r.every(h=>h.room===room)})");
+check('Studios and private rooms correctly have no intersection',"resultsFor({...all,type:'Studio',room:'Private Room'}).length===0");
+check('Move-in cutoff excludes homes available later',"!resultsFor({...all,move:'2026-11-14',includeClosed:true}).some(h=>h.id==='richmond')&&resultsFor({...all,move:'2026-11-15',includeClosed:true}).some(h=>h.id==='richmond')");
+check('Later move-in date reveals December homes',"!resultsFor({...all,move:'2026-11-30'}).some(h=>h.id==='redwood')&&resultsFor({...all,move:'2026-12-01'}).some(h=>h.id==='redwood')");
+check('Empty search date permits any availability',"resultsFor({...all,move:''}).length===resultsFor(all).length");
+check('Every home has all nine destination/method estimates',"HOMES.every(h=>['SoMa, San Francisco','UC Berkeley','Stanford University'].every(destination=>['Transit','Driving','Cycling'].every(method=>Number.isFinite(estimatedCommute(h,{destination,method})))))");
+check('Commute caps work across all three methods and destinations',"(()=>{for(const destination of ['SoMa, San Francisco','UC Berkeley','Stanford University'])for(const method of ['Transit','Driving','Cycling'])for(const maxCommute of ['15','30','45','60','90','120']){const f={...all,destination,method,maxCommute};if(!resultsFor(f).every(h=>estimatedCommute(h,f)<=+maxCommute))return false}return true})()");
+check('Travel method can change eligibility',"!resultsFor({...all,destination:'SoMa, San Francisco',method:'Transit',maxCommute:'30'}).some(h=>h.id==='sunset')&&resultsFor({...all,destination:'SoMa, San Francisco',method:'Driving',maxCommute:'30'}).some(h=>h.id==='sunset')");
+check('Destination can change eligibility',"!resultsFor({...all,destination:'SoMa, San Francisco',maxCommute:'15'}).some(h=>h.id==='paloalto')&&resultsFor({...all,destination:'Stanford University',maxCommute:'15'}).some(h=>h.id==='paloalto')");
+check('Every supported city produces only local matches',"['San Francisco','Oakland','Berkeley','Daly City','San Jose','Redwood City','Palo Alto','San Mateo','Fremont'].every(location=>{const r=resultsFor({...all,location});return r.length>0&&r.every(h=>h.city.startsWith(location+','))})");
+check('Location handles SF alias, case, region, and unknown cities',"resultsFor({...all,location:'sF'}).length===resultsFor({...all,location:'San Francisco'}).length&&resultsFor({...all,location:'Bay Area, CA'}).length===resultsFor(all).length&&resultsFor({...all,location:'Pittsburgh'}).length===0");
+check('Closed listing is opt-in only',"!resultsFor(all).some(h=>h.id==='richmond')&&resultsFor({...all,includeClosed:true}).some(h=>h.id==='richmond')");
+check('Invalid budgets and past dates show validation rather than stale results',"['','-10','NaN','5001'].every(budget=>validateFilters({...all,budget}).budget&&resultsFor({...all,budget}).length===0)&&!!validateFilters({...all,move:'2020-01-01'}).move");
+check('All filters combine on a specific known match',"(()=>{const f={...all,location:'SoMa',budget:'2000',move:'2026-11-01',type:'Condo',room:'Private Room',amenities:['In-unit laundry','Pet friendly','Gym','AC','Parking'],destination:'SoMa, San Francisco',method:'Transit',maxCommute:'15'};const r=resultsFor(f);return r.length===1&&r[0].id==='soma'})()");
+run("S.filters=structuredClone(all);S.pendingFilters=structuredClone(all)");
+check('Rent sort, descending sort, and commute sort are correct',"['rent','rent-desc','commute'].every(sort=>{S.sort=sort;const r=sortedResults();return r.every((h,i)=>i===0||(sort==='commute'?estimatedCommute(r[i-1],S.filters)<=estimatedCommute(h,S.filters):sort==='rent'?r[i-1].rent<=h.rent:r[i-1].rent>=h.rent))})");
+run("S.filters=structuredClone(DEFAULT_FILTERS);S.pendingFilters=structuredClone(DEFAULT_FILTERS);updateFilter('amenities',['In-unit laundry','Pet friendly'])");
+check('Changing a filter immediately refreshes rendered cards and map',"!$('#search-results-pane').innerHTML.includes('id=\"result-daly\"')&&!$('#search-results-pane').innerHTML.includes('data-pin=\"daly\"')&&$('#search-results-pane').innerHTML.includes('Pet friendly')");
+run("updateFilter('budget','2500')");
+check('Live budget change displays added higher-priced homes',"S.filters.budget==='2500'&&$('#search-results-pane').innerHTML.includes('id=\"result-soma\"')&&$('#search-results-pane').innerHTML.includes('id=\"result-paloalto\"')");
+check('Map marker set exactly equals eligible card set',"(()=>{const r=sortedResults(),markup=searchPanels(r);return r.every(h=>markup.includes('id=\"result-'+h.id+'\"')&&markup.includes('data-pin=\"'+h.id+'\"'))&&HOMES.filter(h=>!r.includes(h)).every(h=>!markup.includes('id=\"result-'+h.id+'\"')&&!markup.includes('data-pin=\"'+h.id+'\"'))})()");
+run("S.page='search';clearFilters()");
+check('Clear filters restores all open homes',"resultsFor(S.filters).length===23&&S.filters.room==='Any'&&S.filters.amenities.length===0");
+run("resetFilters()");check('Reset restores original preferences',"S.filters.budget==='1500'&&S.filters.room==='Private Room'&&S.filters.amenities.includes('In-unit laundry')&&S.filters.maxCommute==='60'");
+check('All map markers fit distinct schematic slots',"(()=>{const pins=mapPins(HOMES);return pins.length===24&&new Set(pins.map(h=>h.pinX+','+h.pinY)).size===24&&pins.every(h=>h.pinX>=10&&h.pinX<=90&&h.pinY>=5&&h.pinY<=95)})()");
+console.log(count+' filter regression checks passed.');
